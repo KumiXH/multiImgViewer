@@ -13,6 +13,11 @@ class CompareMode(str, Enum):
     PRIMARY = "primary"
 
 
+class SftpAuthMode(str, Enum):
+    PASSWORD = "password"
+    KEY = "key"
+
+
 @dataclass(frozen=True)
 class SourceConfig:
     id: str
@@ -20,3 +25,11 @@ class SourceConfig:
     display_name: str
     root_path: str
     recursive: bool = False
+
+
+@dataclass(frozen=True)
+class SftpAuthConfig:
+    mode: SftpAuthMode
+    password: str | None = None
+    private_key_path: str | None = None
+    passphrase: str | None = None
