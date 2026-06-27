@@ -5,3 +5,8 @@ __pycache__/
 .ruff_cache/
 *.pyc
 *.egg-info/
+build/
+dist/
+.remote_image_compare/
+*.zip
+*.deb

@@ -37,3 +37,22 @@ def test_local_source_reads_file_bytes(tmp_path: Path) -> None:
     )
 
     assert source.read_bytes("img1.jpg") == b"image-data"
+
+
+def test_local_source_lists_nested_images_when_recursive_enabled(tmp_path: Path) -> None:
+    nested = tmp_path / "setA"
+    nested.mkdir()
+    (nested / "img2.jpg").write_bytes(b"jpg")
+    (nested / "notes.txt").write_text("ignore me", encoding="utf-8")
+
+    source = LocalPathSource(
+        SourceConfig(
+            id="pane-1",
+            kind=SourceKind.LOCAL,
+            display_name="Local",
+            root_path=str(tmp_path),
+            recursive=True,
+        )
+    )
+
+    assert source.list_relative_paths() == ["setA/img2.jpg"]
