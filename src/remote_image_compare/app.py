@@ -9,7 +9,7 @@ configure_frozen_windows_dll_paths()
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="remote-image-compare")
+    parser = argparse.ArgumentParser(prog="mulitImgViewer")
     parser.add_argument(
         "--source",
         dest="sources",

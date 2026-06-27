@@ -17,9 +17,9 @@ try {
     }) -join ';'
 
     & $python -m pip install -e ".[dev]"
-    & $python -m PyInstaller --noconfirm --clean "RemoteImageCompare.spec"
+    & $python -m PyInstaller --noconfirm --clean "mulitImgViewer.spec"
 
-    $distRoot = Join-Path $root "dist\RemoteImageCompare"
+    $distRoot = Join-Path $root "dist\mulitImgViewer"
     $configRoot = Join-Path $distRoot ".remote_image_compare"
     if (-not (Test-Path $configRoot)) {
         New-Item -ItemType Directory -Path $configRoot | Out-Null

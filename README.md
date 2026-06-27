@@ -1,8 +1,8 @@
-# multiImgViewer / 多图远程对比查看器
+# mulitImgViewer / 多图远程对比查看器
 
-multiImgViewer 是一个面向 Windows 的多图对比查看工具，重点解决“在 Windows 上通过 Samba/网络盘查看 Linux 图片很卡”的问题。它支持本地目录、UNC 网络路径、SSH/SFTP 远端目录，并提供多窗口同步缩放、平移、交换对比、容差图等功能，适合超分辨率、图像增强、数据集标注和多版本图片质量对比。
+mulitImgViewer 是一个面向 Windows 的多图对比查看工具，重点解决“在 Windows 上通过 Samba/网络盘查看 Linux 图片很卡”的问题。它支持本地目录、UNC 网络路径、SSH/SFTP 远端目录，并提供多窗口同步缩放、平移、交换对比、容差图等功能，适合超分辨率、图像增强、数据集标注和多版本图片质量对比。
 
-multiImgViewer is a Windows-first multi-image comparison viewer for local folders, UNC shares, and SSH/SFTP remote folders. It is designed for fast visual comparison of image datasets, model outputs, and image-processing variants.
+mulitImgViewer is a Windows-first multi-image comparison viewer for local folders, UNC shares, and SSH/SFTP remote folders. It is designed for fast visual comparison of image datasets, model outputs, and image-processing variants.
 
 ## 下载使用 / Download
 
@@ -10,14 +10,14 @@ multiImgViewer is a Windows-first multi-image comparison viewer for local folder
 
 Download the Windows release package here:
 
-[multiImgViewer V1.0 Release](https://github.com/KumiXH/multiImgViewer/releases/tag/V1.0)
+[mulitImgViewer V1.0 Release](/releases/tag/V1.0)
 
-下载 `multiImgViewer-V1.0-windows-x64.zip` 后解压，双击运行：
+下载 `mulitImgViewer-V1.0-windows-x64.zip` 后解压，双击运行：
 
-After extracting `multiImgViewer-V1.0-windows-x64.zip`, run:
+After extracting `mulitImgViewer-V1.0-windows-x64.zip`, run:
 
 ```text
-RemoteImageCompare.exe
+mulitImgViewer.exe
 ```
 
 注意：不要只拷贝单个 EXE，请保留整个解压目录。程序运行配置会保存在 EXE 同目录的 `.remote_image_compare` 文件夹中。
@@ -121,12 +121,12 @@ Build a redistributable Windows folder:
 Output folder:
 
 ```text
-dist\RemoteImageCompare\RemoteImageCompare.exe
+dist\mulitImgViewer\mulitImgViewer.exe
 ```
 
-发布时请压缩整个 `dist\RemoteImageCompare` 目录，而不是单独发布 EXE。
+发布时请压缩整个 `dist\mulitImgViewer` 目录，而不是单独发布 EXE。
 
-When distributing, zip the whole `dist\RemoteImageCompare` folder instead of shipping only the EXE.
+When distributing, zip the whole `dist\mulitImgViewer` folder instead of shipping only the EXE.
 
 ## 技术栈 / Tech Stack
 

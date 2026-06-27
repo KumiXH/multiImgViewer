@@ -68,7 +68,7 @@ class MainWindow(QMainWindow):
         window_state_store: WindowStateStore | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("Remote Image Compare")
+        self.setWindowTitle("mulitImgViewer")
         self.window_state_store = window_state_store or WindowStateStore()
         self._active_pane_count = 6
         self._compare_modes = [

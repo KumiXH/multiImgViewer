@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "remote-image-compare"
+name = "mulitImgViewer"
 version = "0.1.0"
 description = "Windows-native image comparison tool for local, UNC, and SSH/SFTP sources"
 readme = "README.md"
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-remote-image-compare = "remote_image_compare.app:main"
+mulitImgViewer = "remote_image_compare.app:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

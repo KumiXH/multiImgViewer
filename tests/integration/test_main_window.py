@@ -98,7 +98,7 @@ def _pane_swap_highlighted(pane: ImagePaneWidget) -> bool:
 def test_main_window_has_default_layout(qtbot) -> None:
     window = MainWindow()
     qtbot.addWidget(window)
-    assert window.windowTitle() == "Remote Image Compare"
+    assert window.windowTitle() == "mulitImgViewer"
     assert window.active_pane_count == 6
 
 
