@@ -118,6 +118,7 @@ class ImagePaneWidget(QFrame):
     remote_bind_requested = Signal()
     clear_requested = Signal()
     swap_requested = Signal()
+    copy_path_requested = Signal()
     hover_position_changed = Signal(float, float)
     activated = Signal()
 
@@ -125,16 +126,20 @@ class ImagePaneWidget(QFrame):
         super().__init__()
         self.setObjectName("imagePane")
         self.title_label = QLabel(title)
+        self.title_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.clear_button = QPushButton("\u6e05\u7a7a")
         self.clear_button.clicked.connect(self.clear_requested.emit)
         self.swap_button = QPushButton("\u4ea4\u6362")
         self.swap_button.clicked.connect(self.swap_requested.emit)
+        self.copy_path_button = QPushButton("\u590d\u5236\u8def\u5f84")
+        self.copy_path_button.clicked.connect(self.copy_path_requested.emit)
         self.image_viewport = ImageViewport(self)
         self.status_label = QLabel("\u672a\u7ed1\u5b9a\u76ee\u5f55")
         self.local_bind_button = QPushButton("\u9009\u62e9\u672c\u5730\u76ee\u5f55")
         self.remote_bind_button = QPushButton("\u9009\u62e9\u670d\u52a1\u5668\u76ee\u5f55")
         self.local_bind_button.clicked.connect(self.local_bind_requested.emit)
         self.remote_bind_button.clicked.connect(self.remote_bind_requested.emit)
+        self._bound_path = ""
         self._has_image = False
         self._is_bound = False
         self._base_pixmap = QPixmap()
@@ -152,13 +157,16 @@ class ImagePaneWidget(QFrame):
         header = QWidget()
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
         header_layout.addWidget(self.title_label, 1)
         header_layout.addWidget(self.swap_button)
+        header_layout.addWidget(self.copy_path_button)
         header_layout.addWidget(self.clear_button)
 
         self.empty_state = QWidget()
         empty_layout = QVBoxLayout(self.empty_state)
-        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.setContentsMargins(16, 16, 16, 16)
+        empty_layout.setSpacing(8)
         empty_layout.addStretch(1)
         empty_layout.addWidget(self.local_bind_button, 0, Qt.AlignmentFlag.AlignHCenter)
         empty_layout.addWidget(self.remote_bind_button, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -177,8 +185,8 @@ class ImagePaneWidget(QFrame):
         self.empty_state.dropEvent = self.dropEvent
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
         layout.addWidget(header)
         layout.addWidget(self.content_host, 1)
         layout.addWidget(self.status_label)
@@ -248,6 +256,7 @@ ImagePaneWidget#imagePane QPushButton:hover {
             self.status_label,
             self.clear_button,
             self.swap_button,
+            self.copy_path_button,
             self.content_host,
             self.empty_state,
             self.local_bind_button,
@@ -267,6 +276,12 @@ ImagePaneWidget#imagePane QPushButton:hover {
 
     def title_text(self) -> str:
         return self.title_label.text()
+
+    def set_bound_path(self, path: str) -> None:
+        self._bound_path = path
+
+    def bound_path(self) -> str:
+        return self._bound_path
 
     def set_image(self, image: QImage, status: str) -> None:
         self._base_pixmap = QPixmap.fromImage(image)
@@ -289,6 +304,7 @@ ImagePaneWidget#imagePane QPushButton:hover {
     def clear_binding_state(self) -> None:
         self._has_image = False
         self._is_bound = False
+        self._bound_path = ""
         self._base_pixmap = QPixmap()
         self._zoom_factor = 1.0
         self._pan_x = 0
@@ -424,6 +440,7 @@ ImagePaneWidget#imagePane QPushButton:hover {
     def _update_bound_state_ui(self) -> None:
         self.clear_button.setVisible(self._is_bound)
         self.swap_button.setVisible(self._is_bound)
+        self.copy_path_button.setVisible(self._is_bound and bool(self._bound_path))
         self.content_stack.setCurrentWidget(self.image_viewport if self._has_image else self.empty_state)
 
     def set_swap_state(self, *, pending: bool = False, locked: bool = False) -> None:

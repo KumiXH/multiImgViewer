@@ -1,7 +1,16 @@
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QMimeData, QTimer, Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QImage, QMouseEvent, QWheelEvent
+from PySide6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QImage,
+    QMouseEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QApplication, QDialog, QGraphicsDropShadowEffect
 
 from remote_image_compare.domain.models import (
@@ -225,8 +234,17 @@ def test_tolerance_window_exposes_algorithm_choices(qtbot) -> None:
     window = ToleranceWindow()
     qtbot.addWidget(window)
 
-    assert window.algorithm_combo.count() == 3
-    assert window.algorithm_combo.currentData() == ToleranceAlgorithm.MAX_CHANNEL
+    assert len(window.algorithm_buttons) == 3
+    assert window.selected_algorithm() == ToleranceAlgorithm.MAX_CHANNEL
+
+
+def test_tolerance_window_defaults_to_preview_mode(qtbot) -> None:
+    window = ToleranceWindow()
+    qtbot.addWidget(window)
+
+    assert window.preview_mode_button.isChecked() is True
+    assert window.sync_mode_button.isChecked() is False
+    assert window.view_mode() == "preview"
 
 
 def test_tolerance_window_limits_selection_to_two_panes(qtbot) -> None:
@@ -241,6 +259,25 @@ def test_tolerance_window_limits_selection_to_two_panes(qtbot) -> None:
     assert sum(1 for check in window.pane_checks if check.isChecked()) == 2
 
 
+def test_tolerance_window_highlights_selected_panes_and_allows_deselect(qtbot) -> None:
+    window = ToleranceWindow()
+    qtbot.addWidget(window)
+    window.set_available_panes(["Pane 1", "Pane 2", "Pane 3"])
+
+    qtbot.mouseClick(window.pane_checks[0], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.pane_checks[1], Qt.MouseButton.LeftButton)
+
+    assert window.pane_checks[0].isChecked() is True
+    assert window.pane_checks[1].isChecked() is True
+    assert window.pane_checks[0].styleSheet() != window.pane_checks[2].styleSheet()
+    assert window.pane_checks[1].styleSheet() != window.pane_checks[2].styleSheet()
+
+    qtbot.mouseClick(window.pane_checks[0], Qt.MouseButton.LeftButton)
+
+    assert window.pane_checks[0].isChecked() is False
+    assert window.pane_checks[0].styleSheet() == window.pane_checks[2].styleSheet()
+
+
 def test_tolerance_window_refreshes_when_algorithm_changes(qtbot) -> None:
     image_a = QImage(4, 4, QImage.Format.Format_RGB32)
     image_a.fill(0xFF000000)
@@ -253,8 +290,10 @@ def test_tolerance_window_refreshes_when_algorithm_changes(qtbot) -> None:
     window.set_selected_panes([0, 1])
     window.set_source_images({0: image_a, 1: image_b}, current_filename="img1.png")
 
+    qtbot.waitUntil(lambda: window.current_tolerance_image() is not None)
     first_map = window.current_tolerance_image()
-    window.algorithm_combo.setCurrentIndex(1)
+    qtbot.mouseClick(window.algorithm_buttons[ToleranceAlgorithm.AVERAGE], Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: window.current_tolerance_image() is not None)
     second_map = window.current_tolerance_image()
 
     assert first_map is not None
@@ -272,6 +311,7 @@ def test_tolerance_window_updates_rgb_readout_from_hover(qtbot) -> None:
     window.set_available_panes(["Pane 1", "Pane 2"])
     window.set_selected_panes([0, 1])
     window.set_source_images({0: image_a, 1: image_b}, current_filename="img1.png")
+    qtbot.waitUntil(lambda: window.current_tolerance_image() is not None)
     window.update_hover_position(0.5, 0.5)
 
     assert "17" in window.left_rgb_label.text()
@@ -293,11 +333,109 @@ def test_tolerance_window_keeps_large_map_within_preview_area(qtbot) -> None:
     window.set_selected_panes([0, 1])
     window.set_source_images({0: image_a, 1: image_b}, current_filename="img1.png")
 
-    pixmap = window.image_label.pixmap()
+    qtbot.waitUntil(lambda: window.current_tolerance_image() is not None)
+    pixmap = window.tolerance_view.current_display_pixmap()
 
     assert pixmap is not None
-    assert pixmap.width() <= window.image_label.width()
-    assert pixmap.height() <= window.image_label.height()
+    assert pixmap.width() <= window.tolerance_view.width()
+    assert pixmap.height() <= window.tolerance_view.height()
+
+
+def test_tolerance_window_preview_mode_disables_interactive_zoom(qtbot) -> None:
+    image_a = QImage(640, 480, QImage.Format.Format_RGB32)
+    image_a.fill(0xFF000000)
+    image_b = QImage(640, 480, QImage.Format.Format_RGB32)
+    image_b.fill(0xFF101010)
+
+    window = ToleranceWindow()
+    qtbot.addWidget(window)
+    window.resize(700, 520)
+    window.show()
+    qtbot.waitExposed(window)
+    window.set_available_panes(["Pane 1", "Pane 2"])
+    window.set_selected_panes([0, 1])
+    window.set_source_images({0: image_a, 1: image_b}, current_filename="img1.png")
+
+    qtbot.waitUntil(lambda: window.current_tolerance_image() is not None)
+    before = window.tolerance_view.zoom_factor()
+    center = window.tolerance_view.rect().center()
+    event = QWheelEvent(
+        center,
+        window.tolerance_view.mapToGlobal(center),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    QApplication.sendEvent(window.tolerance_view, event)
+
+    assert window.tolerance_view.zoom_factor() == before
+
+
+def test_tolerance_window_sync_mode_uses_full_resolution_map(qtbot) -> None:
+    image_a = QImage(1600, 1200, QImage.Format.Format_RGB32)
+    image_a.fill(0xFF000000)
+    image_b = QImage(1600, 1200, QImage.Format.Format_RGB32)
+    image_b.fill(0xFF101010)
+
+    window = ToleranceWindow()
+    qtbot.addWidget(window)
+    window.resize(700, 520)
+    window.show()
+    qtbot.waitExposed(window)
+    window.set_available_panes(["Pane 1", "Pane 2"])
+    window.set_selected_panes([0, 1])
+    window.set_source_images({0: image_a, 1: image_b}, current_filename="img1.png")
+
+    qtbot.mouseClick(window.sync_mode_button, Qt.MouseButton.LeftButton)
+
+    assert window.view_mode() == "sync"
+    qtbot.waitUntil(
+        lambda: window.current_tolerance_image() is not None
+        and window.current_tolerance_image().width() == 1600,
+        timeout=4000,
+    )
+    assert window.current_tolerance_image().width() == 1600
+    assert window.current_tolerance_image().height() == 1200
+
+
+def test_tolerance_window_sync_mode_shows_preview_before_full_resolution(
+    qtbot, monkeypatch
+) -> None:
+    image_a = QImage(1600, 1200, QImage.Format.Format_RGB32)
+    image_a.fill(0xFF000000)
+    image_b = QImage(1600, 1200, QImage.Format.Format_RGB32)
+    image_b.fill(0xFF101010)
+
+    window = ToleranceWindow()
+    qtbot.addWidget(window)
+    window.resize(700, 520)
+    window.show()
+    qtbot.waitExposed(window)
+    window.set_available_panes(["Pane 1", "Pane 2"])
+    window.set_selected_panes([0, 1])
+
+    original = window._tolerance_service.build_tolerance_map
+
+    def delayed_build(*args, **kwargs):
+        if kwargs.get("max_size") is None:
+            time.sleep(0.15)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(window._tolerance_service, "build_tolerance_map", delayed_build)
+
+    window.set_source_images({0: image_a, 1: image_b}, current_filename="img1.png")
+    qtbot.mouseClick(window.sync_mode_button, Qt.MouseButton.LeftButton)
+
+    qtbot.waitUntil(lambda: window.current_tolerance_image() is not None)
+    assert window.current_tolerance_image().width() < 1600
+    qtbot.waitUntil(
+        lambda: window.current_tolerance_image() is not None
+        and window.current_tolerance_image().width() == 1600,
+        timeout=4000,
+    )
 
 
 def test_server_profile_dialog_can_run_connection_test(qtbot) -> None:
@@ -356,6 +494,27 @@ def test_bound_pane_exposes_swap_action(qtbot) -> None:
     pane.set_image(image, "img")
 
     assert pane.swap_button.isHidden() is False
+
+
+def test_bound_pane_exposes_copy_path_action(qtbot) -> None:
+    pane = ImagePaneWidget("Pane 1")
+    qtbot.addWidget(pane)
+    pane.show()
+    qtbot.waitExposed(pane)
+    image = QImage(10, 10, QImage.Format.Format_RGB32)
+    pane.set_bound_path(r"D:\dataset\HR")
+    pane.set_image(image, "img")
+
+    assert pane.copy_path_button.isHidden() is False
+
+
+def test_pane_title_label_text_is_selectable(qtbot) -> None:
+    pane = ImagePaneWidget("Pane 1")
+    qtbot.addWidget(pane)
+
+    assert (
+        pane.title_label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+    )
 
 
 def test_remote_directory_dialog_loads_children_lazily(qtbot) -> None:
@@ -1280,7 +1439,13 @@ def test_pane_header_and_status_widgets_accept_directory_drag(qtbot) -> None:
     pane.show()
     qtbot.waitExposed(pane)
 
-    children = [pane.title_label, pane.status_label, pane.clear_button, pane.swap_button]
+    children = [
+        pane.title_label,
+        pane.status_label,
+        pane.clear_button,
+        pane.swap_button,
+        pane.copy_path_button,
+    ]
 
     for child in children:
         assert child.acceptDrops() is True
@@ -1410,6 +1575,47 @@ def test_main_window_bind_source_path_loads_first_image(qtbot, tmp_path: Path) -
     assert window.first_pane().has_image() is True
     assert window.first_pane().status_text() == "16 x 9"
     assert window.current_filename_label.text() == "img1.png"
+
+
+def test_main_window_copy_path_button_copies_bound_root_path(qtbot, tmp_path: Path) -> None:
+    image = QImage(16, 9, QImage.Format.Format_RGB32)
+    image.fill(0xFF56789A)
+    assert image.save(str(tmp_path / "img1.png"), "PNG")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window.bind_source_path(0, str(tmp_path))
+    qtbot.mouseClick(window.first_pane().copy_path_button, Qt.MouseButton.LeftButton)
+
+    assert QApplication.clipboard().text() == str(tmp_path)
+
+
+def test_binding_new_source_preserves_current_item_when_still_available(
+    qtbot, tmp_path: Path
+) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    for folder, color_offset in ((left, 1), (right, 10)):
+        for index in range(1, 3):
+            image = QImage(12, 12, QImage.Format.Format_RGB32)
+            image.fill(color_offset + index)
+            assert image.save(str(folder / f"img{index}.png"), "PNG")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window.bind_source_path(0, str(left))
+    window.set_current_index(1)
+
+    assert window.current_filename() == "img2.png"
+
+    window.bind_source_path(1, str(right))
+
+    assert window.current_filename() == "img2.png"
+    assert window.current_file_label() == "2 / 2"
 
 
 def test_clicking_catalog_item_loads_real_image(qtbot, tmp_path: Path) -> None:
@@ -1609,10 +1815,15 @@ def test_navigation_refreshes_open_tolerance_map_content(qtbot, tmp_path: Path) 
     window.open_tolerance_window()
     window._tolerance_window.tolerance_slider.setValue(0)
     window._tolerance_window.set_selected_panes([0, 1])
+    qtbot.waitUntil(lambda: window._tolerance_window.current_tolerance_image() is not None)
 
     first_map = window._tolerance_window.current_tolerance_image()
 
     window.next_image()
+    qtbot.waitUntil(
+        lambda: window._tolerance_window.current_tolerance_image() is not None
+        and window._tolerance_window.current_filename_label.text() == "img2.png"
+    )
 
     second_map = window._tolerance_window.current_tolerance_image()
 
@@ -1620,8 +1831,129 @@ def test_navigation_refreshes_open_tolerance_map_content(qtbot, tmp_path: Path) 
     assert second_map is not None
     assert window._tolerance_window.current_filename_label.text() == "img2.png"
     assert sum(1 for check in window._tolerance_window.pane_checks if check.isChecked()) == 2
-    assert first_map.pixelColor(0, 0).getRgb()[:3] == (128, 128, 128)
-    assert second_map.pixelColor(0, 0).getRgb()[:3] == (255, 0, 0)
+    assert first_map.pixelColor(0, 0).getRgb()[:3] == (0, 0, 0)
+    second_color = second_map.pixelColor(0, 0)
+    assert second_color.red() > second_color.green()
+    assert second_color.red() > second_color.blue()
+
+
+def test_sync_tolerance_mode_follows_main_pane_view_state(qtbot, tmp_path: Path) -> None:
+    left_root = tmp_path / "left"
+    right_root = tmp_path / "right"
+    left_root.mkdir()
+    right_root.mkdir()
+    _save_image(left_root / "img1.png", 1920, 1080, 0xFF000000)
+    _save_image(right_root / "img1.png", 1920, 1080, 0xFF101010)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    qtbot.waitExposed(window)
+    window.bind_source(
+        0,
+        SourceConfig(
+            id="pane-1",
+            kind=SourceKind.LOCAL,
+            display_name="Local A",
+            root_path=str(left_root),
+            recursive=False,
+        ),
+    )
+    window.bind_source(
+        1,
+        SourceConfig(
+            id="pane-2",
+            kind=SourceKind.LOCAL,
+            display_name="Local B",
+            root_path=str(right_root),
+            recursive=False,
+        ),
+    )
+    window.refresh_catalog()
+    window.load_first_catalog_item_if_available()
+    window.open_tolerance_window()
+    assert window._tolerance_window is not None
+    window._tolerance_window.set_selected_panes([0, 1])
+    qtbot.mouseClick(window._tolerance_window.sync_mode_button, Qt.MouseButton.LeftButton)
+
+    window.first_pane().apply_zoom_delta(4)
+    _drag_pane_by(window.first_pane(), QPoint(30, 18))
+    qtbot.waitUntil(
+        lambda: window._tolerance_window.current_tolerance_image() is not None
+        and window._tolerance_window.current_tolerance_image().width() < 1920,
+        timeout=4000,
+    )
+
+    assert window._tolerance_window.view_mode() == "sync"
+    assert window._tolerance_window.tolerance_view.zoom_factor() == 1.0
+
+
+def test_sync_tolerance_mode_aligns_different_image_sizes_when_zoomed(
+    qtbot, tmp_path: Path
+) -> None:
+    left_root = tmp_path / "left"
+    right_root = tmp_path / "right"
+    left_root.mkdir()
+    right_root.mkdir()
+
+    left = QImage(200, 100, QImage.Format.Format_RGB32)
+    left.fill(QColor(0, 0, 0))
+    right = QImage(100, 50, QImage.Format.Format_RGB32)
+    right.fill(QColor(0, 0, 0))
+    for x in range(50, 150):
+        for y in range(25, 75):
+            left.setPixelColor(x, y, QColor(255, 255, 255))
+    for x in range(25, 75):
+        for y in range(12, 37):
+            right.setPixelColor(x, y, QColor(255, 255, 255))
+    assert left.save(str(left_root / "img1.png"), "PNG")
+    assert right.save(str(right_root / "img1.png"), "PNG")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1200, 800)
+    window.show()
+    qtbot.waitExposed(window)
+    window.bind_source(
+        0,
+        SourceConfig(
+            id="pane-1",
+            kind=SourceKind.LOCAL,
+            display_name="Local A",
+            root_path=str(left_root),
+            recursive=False,
+        ),
+    )
+    window.bind_source(
+        1,
+        SourceConfig(
+            id="pane-2",
+            kind=SourceKind.LOCAL,
+            display_name="Local B",
+            root_path=str(right_root),
+            recursive=False,
+        ),
+    )
+    window.refresh_catalog()
+    window.load_first_catalog_item_if_available()
+    window.open_tolerance_window()
+    assert window._tolerance_window is not None
+    window._tolerance_window.tolerance_slider.setValue(0)
+    window._tolerance_window.set_selected_panes([0, 1])
+    qtbot.mouseClick(window._tolerance_window.sync_mode_button, Qt.MouseButton.LeftButton)
+
+    window.first_pane().apply_zoom_delta(2)
+    qtbot.waitUntil(
+        lambda: window._tolerance_window.current_tolerance_image() is not None
+        and window._tolerance_window.current_tolerance_image().width() < 200,
+        timeout=4000,
+    )
+
+    current_map = window._tolerance_window.current_tolerance_image()
+    assert current_map is not None
+    center = current_map.pixelColor(current_map.width() // 2, current_map.height() // 2)
+    assert center == QColor(255, 255, 255)
 
 
 def test_hidden_tolerance_window_does_not_refresh_on_navigation(
@@ -1711,6 +2043,7 @@ def test_main_window_hover_updates_open_tolerance_window_rgb_readout(qtbot, tmp_
     window.load_first_catalog_item_if_available()
     window.open_tolerance_window()
     window._tolerance_window.set_selected_panes([0, 1])
+    qtbot.waitUntil(lambda: window._tolerance_window.current_tolerance_image() is not None)
 
     pos = QPoint(20, 20)
     event = QMouseEvent(
@@ -1722,6 +2055,7 @@ def test_main_window_hover_updates_open_tolerance_window_rgb_readout(qtbot, tmp_
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(window.first_pane().image_viewport, event)
+    qtbot.waitUntil(lambda: window._tolerance_window.left_rgb_label.text() != "")
 
     assert "17" in window._tolerance_window.left_rgb_label.text()
 
@@ -2558,6 +2892,29 @@ def test_zoom_does_not_increase_main_window_minimum_size(qtbot, tmp_path: Path) 
 
     assert after.width() <= before.width()
     assert after.height() <= before.height()
+
+
+def test_main_window_uses_tighter_grid_spacing_for_larger_image_area(qtbot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    margins = window.grid_layout.contentsMargins()
+    assert window.grid_layout.spacing() <= 8
+    assert window.left_panel_layout.spacing() <= 8
+    assert margins.left() == 0
+    assert margins.top() == 0
+
+
+def test_image_pane_prioritizes_viewport_area_over_frame_spacing(qtbot) -> None:
+    pane = ImagePaneWidget("Pane 1")
+    qtbot.addWidget(pane)
+
+    layout = pane.layout()
+    margins = layout.contentsMargins()
+
+    assert layout.spacing() <= 6
+    assert margins.left() <= 8
+    assert margins.top() <= 8
 
 
 def test_pane_widget_drag_updates_pan_offset(qtbot) -> None:

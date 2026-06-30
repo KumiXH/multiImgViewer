@@ -2,9 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QGuiApplication, QImage, QPixmap
+from PySide6.QtCore import (
+    QObject,
+    QPointF,
+    QRect,
+    QRectF,
+    QRunnable,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -27,12 +39,302 @@ from PySide6.QtWidgets import (
 from remote_image_compare.domain.models import CompareMode, SessionRecord, SftpAuthMode, SftpServerProfile
 from remote_image_compare.domain.models import ToleranceAlgorithm
 from remote_image_compare.services.remote_browser_service import RemoteBrowserService
-from remote_image_compare.services.tolerance_map_service import ToleranceMapService
+from remote_image_compare.services.tolerance_map_service import (
+    PreparedToleranceComparison,
+    ToleranceMapService,
+)
 from remote_image_compare.services.window_state_store import WindowStateStore
 
 
 def _server_label(profile: SftpServerProfile) -> str:
     return f"{profile.name}  {profile.host}:{profile.port}  {profile.username}"
+
+
+class ToleranceComputeSignals(QObject):
+    preview_ready = Signal(int, QImage, object)
+    final_ready = Signal(int, QImage, object)
+
+class ToleranceComputeTask(QRunnable):
+    def __init__(self, service: ToleranceMapService, job: dict[str, object]) -> None:
+        super().__init__()
+        self._service = service
+        self._job = job
+        self.signals = ToleranceComputeSignals()
+
+    def _emit_preview(self, job_id: int, image: QImage, prepared: PreparedToleranceComparison) -> None:
+        try:
+            self.signals.preview_ready.emit(job_id, image, prepared)
+        except RuntimeError:
+            return
+
+    def _emit_final(self, job_id: int, image: QImage, prepared: PreparedToleranceComparison) -> None:
+        try:
+            self.signals.final_ready.emit(job_id, image, prepared)
+        except RuntimeError:
+            return
+
+    @Slot()
+    def run(self) -> None:
+        job = self._job
+        job_id = int(job["job_id"])
+        left = job["left"]
+        right = job["right"]
+        tolerance = int(job["tolerance"])
+        algorithm = job["algorithm"]
+        preview_size = job["preview_size"]
+        roi = job.get("roi")
+        sync_mode = bool(job["sync_mode"])
+
+        prepared_preview = self._service.prepare_comparison(
+            left,
+            right,
+            algorithm,
+            max_size=preview_size,
+            roi=roi,
+        )
+        preview_map = self._service.build_tolerance_map(
+            left,
+            right,
+            tolerance=tolerance,
+            algorithm=algorithm,
+            max_size=preview_size,
+            roi=roi,
+        )
+        self._emit_preview(job_id, preview_map, prepared_preview)
+
+        if not sync_mode:
+            return
+
+        prepared_final = self._service.prepare_comparison(
+            left,
+            right,
+            algorithm,
+            max_size=None,
+            roi=roi,
+        )
+        final_map = self._service.build_tolerance_map(
+            left,
+            right,
+            tolerance=tolerance,
+            algorithm=algorithm,
+            max_size=None,
+            roi=roi,
+        )
+        self._emit_final(job_id, final_map, prepared_final)
+
+
+class ToleranceImageView(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(320, 180)
+        self.setMouseTracking(True)
+        self._image = QImage()
+        self._zoom_factor = 1.0
+        self._pan_x = 0
+        self._pan_y = 0
+        self._dragging = False
+        self._last_drag_pos: QPointF | None = None
+        self._interactive_enabled = False
+        self._display_pixmap: QPixmap | None = None
+        self._empty_text = "请选择两个窗口"
+
+    def set_empty_text(self, text: str) -> None:
+        self._empty_text = text
+        self.update()
+
+    def set_image(self, image: QImage | None) -> None:
+        self._image = QImage() if image is None else image
+        self.reset_view()
+        self.repaint()
+
+    def set_interactive_enabled(self, enabled: bool) -> None:
+        self._interactive_enabled = enabled
+        if not enabled:
+            self.reset_view()
+        self.update()
+
+    def current_display_pixmap(self) -> QPixmap | None:
+        if self._image.isNull():
+            return None
+        self._display_pixmap = self._build_display_pixmap()
+        return self._display_pixmap
+
+    def zoom_factor(self) -> float:
+        return self._zoom_factor
+
+    def view_state(self) -> tuple[float, float, float]:
+        center_x, center_y = self._current_center()
+        return (self._zoom_factor, center_x, center_y)
+
+    def set_view_state(self, zoom: float, center_x: float, center_y: float) -> None:
+        if self._image.isNull():
+            return
+        self._zoom_factor = max(1.0, min(16.0, zoom))
+        if self._zoom_factor <= 1.0:
+            self._pan_x = 0
+            self._pan_y = 0
+        else:
+            rendered_width, rendered_height = self._compute_rendered_size(self._zoom_factor)
+            self._pan_x = round(rendered_width * (0.5 - center_x))
+            self._pan_y = round(rendered_height * (0.5 - center_y))
+        self.update()
+
+    def reset_view(self) -> None:
+        self._zoom_factor = 1.0
+        self._pan_x = 0
+        self._pan_y = 0
+        self._dragging = False
+        self._last_drag_pos = None
+        self._display_pixmap = None
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#101217"))
+        if self._image.isNull():
+            painter.setPen(QColor("#d7e3f4"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._empty_text)
+            self._display_pixmap = None
+            return
+
+        pixmap = QPixmap.fromImage(self._image)
+        viewport_width = max(1, self.width())
+        viewport_height = max(1, self.height())
+        fit_scale = min(viewport_width / pixmap.width(), viewport_height / pixmap.height())
+        rendered_width = pixmap.width() * fit_scale * self._zoom_factor
+        rendered_height = pixmap.height() * fit_scale * self._zoom_factor
+        offset_x, offset_y = self._clamp_pan(rendered_width, rendered_height)
+
+        target = QRectF(offset_x, offset_y, rendered_width, rendered_height)
+        source = QRectF(0, 0, pixmap.width(), pixmap.height())
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(target, pixmap, source)
+
+        self._display_pixmap = self._build_display_pixmap()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if not self._interactive_enabled or self._image.isNull() or event.angleDelta().y() == 0:
+            event.ignore()
+            return
+        steps = 1 if event.angleDelta().y() > 0 else -1
+        self._apply_zoom_delta(steps, event.position())
+        event.accept()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._interactive_enabled
+            and not self._image.isNull()
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._zoom_factor > 1.0
+        ):
+            self._dragging = True
+            self._last_drag_pos = event.position()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._dragging and self._last_drag_pos is not None:
+            delta = event.position() - self._last_drag_pos
+            self._last_drag_pos = event.position()
+            self._pan_x += int(delta.x())
+            self._pan_y += int(delta.y())
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._last_drag_pos = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update()
+
+    def _apply_zoom_delta(self, steps: int, anchor_pos: QPointF) -> None:
+        old_zoom = self._zoom_factor
+        old_rendered_width, old_rendered_height = self._compute_rendered_size(old_zoom)
+        old_offset_x, old_offset_y = self._clamp_pan(old_rendered_width, old_rendered_height)
+        self._zoom_factor = max(1.0, min(16.0, self._zoom_factor * (1.25 ** steps)))
+        if self._zoom_factor <= 1.0:
+            self._pan_x = 0
+            self._pan_y = 0
+        else:
+            if old_rendered_width <= 0 or old_rendered_height <= 0:
+                relative_x = 0.5
+                relative_y = 0.5
+            else:
+                relative_x = (anchor_pos.x() - old_offset_x) / old_rendered_width
+                relative_y = (anchor_pos.y() - old_offset_y) / old_rendered_height
+            relative_x = max(0.0, min(1.0, relative_x))
+            relative_y = max(0.0, min(1.0, relative_y))
+            new_rendered_width, new_rendered_height = self._compute_rendered_size()
+            viewport_width = max(1, self.width())
+            viewport_height = max(1, self.height())
+            self._pan_x = round(
+                anchor_pos.x()
+                - relative_x * new_rendered_width
+                - (viewport_width - new_rendered_width) / 2.0
+            )
+            self._pan_y = round(
+                anchor_pos.y()
+                - relative_y * new_rendered_height
+                - (viewport_height - new_rendered_height) / 2.0
+            )
+        self.update()
+
+    def _compute_rendered_size(self, zoom_factor: float | None = None) -> tuple[int, int]:
+        if self._image.isNull():
+            return (0, 0)
+        viewport_width = max(1, self.width())
+        viewport_height = max(1, self.height())
+        fit_scale = min(viewport_width / self._image.width(), viewport_height / self._image.height())
+        zoom = self._zoom_factor if zoom_factor is None else zoom_factor
+        rendered_width = max(1, int(self._image.width() * fit_scale * zoom))
+        rendered_height = max(1, int(self._image.height() * fit_scale * zoom))
+        return (rendered_width, rendered_height)
+
+    def _build_display_pixmap(self) -> QPixmap:
+        pixmap = QPixmap.fromImage(self._image)
+        rendered_width, rendered_height = self._compute_rendered_size()
+        viewport_width = max(1, self.width())
+        viewport_height = max(1, self.height())
+        return pixmap.scaled(
+            int(min(rendered_width, viewport_width)),
+            int(min(rendered_height, viewport_height)),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+
+    def _current_center(self) -> tuple[float, float]:
+        rendered_width, rendered_height = self._compute_rendered_size()
+        if rendered_width <= 0 or rendered_height <= 0 or self._zoom_factor <= 1.0:
+            return (0.5, 0.5)
+        center_x = 0.5 - (self._pan_x / rendered_width)
+        center_y = 0.5 - (self._pan_y / rendered_height)
+        return (
+            max(0.0, min(1.0, center_x)),
+            max(0.0, min(1.0, center_y)),
+        )
+
+    def _clamp_pan(self, rendered_width: float, rendered_height: float) -> tuple[float, float]:
+        viewport_width = max(1, self.width())
+        viewport_height = max(1, self.height())
+        limit_x = max(0.0, (rendered_width - viewport_width) / 2.0)
+        limit_y = max(0.0, (rendered_height - viewport_height) / 2.0)
+
+        self._pan_x = int(max(-limit_x, min(limit_x, self._pan_x)))
+        self._pan_y = int(max(-limit_y, min(limit_y, self._pan_y)))
+
+        offset_x = (viewport_width - rendered_width) / 2.0 + self._pan_x
+        offset_y = (viewport_height - rendered_height) / 2.0 + self._pan_y
+        return (offset_x, offset_y)
 
 
 class ServerProfileDialog(QDialog):
@@ -718,41 +1020,119 @@ class ToleranceWindow(QDialog):
         self.setModal(False)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._tolerance_service = ToleranceMapService()
+        self._thread_pool = QThreadPool.globalInstance()
         self.pane_checks: list[QPushButton] = []
         self._pane_ids: list[int] = []
         self._source_images: dict[int, QImage] = {}
         self._current_tolerance_image: QImage | None = None
         self._prepared = None
+        self._view_mode = "preview"
+        self._pending_sync_view_state: tuple[float, float, float] = (1.0, 0.5, 0.5)
+        self._compute_job_id = 0
+        self._active_job_id = 0
+        self._sync_refresh_timer = QTimer(self)
+        self._sync_refresh_timer.setSingleShot(True)
+        self._sync_refresh_timer.setInterval(120)
+        self._sync_refresh_timer.timeout.connect(self._refresh_tolerance_map)
+        self._pane_button_base_style = (
+            "QPushButton {"
+            " background-color: #ffffff;"
+            " border: 1px solid #d6deea;"
+            " border-radius: 10px;"
+            " padding: 8px 12px;"
+            " text-align: left;"
+            "}"
+        )
+        self._pane_button_selected_style = (
+            "QPushButton {"
+            " background-color: #eaf4ff;"
+            " border: 2px solid #4da3ff;"
+            " border-radius: 10px;"
+            " padding: 7px 11px;"
+            " text-align: left;"
+            " color: #123a66;"
+            " font-weight: 600;"
+            "}"
+        )
+        self._tool_button_base_style = (
+            "QPushButton {"
+            " background-color: #ffffff;"
+            " border: 1px solid #d6deea;"
+            " border-radius: 10px;"
+            " padding: 8px 14px;"
+            "}"
+        )
+        self._tool_button_selected_style = (
+            "QPushButton {"
+            " background-color: #eaf4ff;"
+            " border: 2px solid #4da3ff;"
+            " border-radius: 10px;"
+            " padding: 7px 13px;"
+            " color: #123a66;"
+            " font-weight: 600;"
+            "}"
+        )
 
-        self.algorithm_combo = QComboBox()
-        self.algorithm_combo.addItem("单通道最大差值", ToleranceAlgorithm.MAX_CHANNEL)
-        self.algorithm_combo.addItem("三通道平均差值", ToleranceAlgorithm.AVERAGE)
-        self.algorithm_combo.addItem("欧氏距离", ToleranceAlgorithm.EUCLIDEAN)
-        self.algorithm_combo.currentIndexChanged.connect(self._refresh_tolerance_map)
+        self.algorithm_buttons: dict[ToleranceAlgorithm, QPushButton] = {}
+        self.algorithm_group = QButtonGroup(self)
+        self.algorithm_group.setExclusive(True)
+        algorithm_row = QWidget()
+        algorithm_layout = QHBoxLayout(algorithm_row)
+        algorithm_layout.setContentsMargins(0, 0, 0, 0)
+        algorithm_layout.setSpacing(8)
+        for text, algorithm in (
+            ("单通道", ToleranceAlgorithm.MAX_CHANNEL),
+            ("平均值", ToleranceAlgorithm.AVERAGE),
+            ("欧氏距离", ToleranceAlgorithm.EUCLIDEAN),
+        ):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setStyleSheet(self._tool_button_base_style)
+            button.clicked.connect(self._handle_algorithm_changed)
+            self.algorithm_group.addButton(button)
+            self.algorithm_buttons[algorithm] = button
+            algorithm_layout.addWidget(button)
+        self.algorithm_buttons[ToleranceAlgorithm.MAX_CHANNEL].setChecked(True)
 
         self.tolerance_slider = QSpinBox()
         self.tolerance_slider.setRange(0, 255)
         self.tolerance_slider.setValue(10)
         self.tolerance_slider.valueChanged.connect(self._refresh_tolerance_map)
 
+        self.preview_mode_button = QPushButton("预览")
+        self.preview_mode_button.setCheckable(True)
+        self.sync_mode_button = QPushButton("同步查看")
+        self.sync_mode_button.setCheckable(True)
+        self.view_mode_group = QButtonGroup(self)
+        self.view_mode_group.setExclusive(True)
+        self.view_mode_group.addButton(self.preview_mode_button)
+        self.view_mode_group.addButton(self.sync_mode_button)
+        self.preview_mode_button.setChecked(True)
+        self.preview_mode_button.clicked.connect(lambda: self._set_view_mode("preview"))
+        self.sync_mode_button.clicked.connect(lambda: self._set_view_mode("sync"))
+
+        view_mode_row = QWidget()
+        view_mode_layout = QHBoxLayout(view_mode_row)
+        view_mode_layout.setContentsMargins(0, 0, 0, 0)
+        view_mode_layout.setSpacing(8)
+        view_mode_layout.addWidget(self.preview_mode_button)
+        view_mode_layout.addWidget(self.sync_mode_button)
+        view_mode_layout.addStretch(1)
+
         self.current_filename_label = QLabel("")
         self.status_label = QLabel("请选择两个窗口")
         self.left_rgb_label = QLabel("")
         self.right_rgb_label = QLabel("")
-        self.image_label = QLabel("请选择两个窗口")
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Ignored,
-        )
-        self.image_label.setMinimumSize(320, 180)
+        self.tolerance_view = ToleranceImageView()
+        self.tolerance_view.set_empty_text("请选择两个窗口")
 
         self.pane_host = QWidget()
         self.pane_layout = QVBoxLayout(self.pane_host)
         self.pane_layout.setContentsMargins(0, 0, 0, 0)
 
         controls = QFormLayout()
-        controls.addRow("算法", self.algorithm_combo)
+        controls.addRow("算法", algorithm_row)
+        controls.addRow("查看方式", view_mode_row)
         controls.addRow("容差", self.tolerance_slider)
 
         layout = QVBoxLayout(self)
@@ -760,10 +1140,12 @@ class ToleranceWindow(QDialog):
         layout.addWidget(self.pane_host)
         layout.addLayout(controls)
         layout.addWidget(self.status_label)
-        layout.addWidget(self.image_label, 1)
+        layout.addWidget(self.tolerance_view, 1)
         layout.addWidget(self.left_rgb_label)
         layout.addWidget(self.right_rgb_label)
 
+        self._refresh_tool_button_styles()
+        self.tolerance_view.set_interactive_enabled(False)
         self._restore_window_size()
 
     def set_available_panes(self, pane_names: list[str]) -> None:
@@ -779,24 +1161,29 @@ class ToleranceWindow(QDialog):
             check = QPushButton(name)
             check.setCheckable(True)
             check.toggled.connect(self._enforce_two_selection_limit)
+            check.setStyleSheet(self._pane_button_base_style)
             self.pane_checks.append(check)
             self.pane_layout.addWidget(check)
         for pane_id, check in zip(self._pane_ids, self.pane_checks):
             if pane_id in selected_before:
                 check.setChecked(True)
+        self._refresh_pane_check_styles()
 
     def set_selected_panes(self, pane_ids: list[int]) -> None:
         allowed = set(pane_ids[:2])
         for pane_id, check in zip(self._pane_ids, self.pane_checks):
             check.setChecked(pane_id in allowed)
+        self._refresh_pane_check_styles()
         self._refresh_tolerance_map()
 
     def _enforce_two_selection_limit(self) -> None:
         checked = [check for check in self.pane_checks if check.isChecked()]
         if len(checked) <= 2:
+            self._refresh_pane_check_styles()
             self._refresh_tolerance_map()
             return
         checked[-1].setChecked(False)
+        self._refresh_pane_check_styles()
         self._refresh_tolerance_map()
 
     def set_source_images(self, images_by_pane: dict[int, QImage], current_filename: str) -> None:
@@ -806,6 +1193,22 @@ class ToleranceWindow(QDialog):
 
     def current_tolerance_image(self) -> QImage | None:
         return self._current_tolerance_image
+
+    def selected_algorithm(self) -> ToleranceAlgorithm:
+        for algorithm, button in self.algorithm_buttons.items():
+            if button.isChecked():
+                return algorithm
+        return ToleranceAlgorithm.MAX_CHANNEL
+
+    def view_mode(self) -> str:
+        return self._view_mode
+
+    def set_sync_view_state(self, zoom: float, center_x: float, center_y: float) -> None:
+        self._pending_sync_view_state = (zoom, center_x, center_y)
+        if self._view_mode == "sync":
+            self.tolerance_view.set_view_state(1.0, center_x, center_y)
+            if self._selected_pane_ids():
+                self._sync_refresh_timer.start()
 
     def update_hover_position(self, normalized_x: float, normalized_y: float) -> None:
         if self._prepared is None:
@@ -823,14 +1226,42 @@ class ToleranceWindow(QDialog):
             if check.isChecked()
         ]
 
+    def _refresh_pane_check_styles(self) -> None:
+        for check in self.pane_checks:
+            check.setStyleSheet(
+                self._pane_button_selected_style if check.isChecked() else self._pane_button_base_style
+            )
+
+    def _refresh_tool_button_styles(self) -> None:
+        for button in self.algorithm_buttons.values():
+            button.setStyleSheet(
+                self._tool_button_selected_style if button.isChecked() else self._tool_button_base_style
+            )
+        for button in (self.preview_mode_button, self.sync_mode_button):
+            button.setStyleSheet(
+                self._tool_button_selected_style if button.isChecked() else self._tool_button_base_style
+            )
+
+    def _handle_algorithm_changed(self) -> None:
+        self._refresh_tool_button_styles()
+        self._refresh_tolerance_map()
+
+    def _set_view_mode(self, mode: str) -> None:
+        self._view_mode = mode
+        self.preview_mode_button.setChecked(mode == "preview")
+        self.sync_mode_button.setChecked(mode == "sync")
+        self._refresh_tool_button_styles()
+        self.tolerance_view.set_interactive_enabled(mode == "sync")
+        self._refresh_tolerance_map()
+
     def _refresh_tolerance_map(self) -> None:
         selected = self._selected_pane_ids()
         if len(selected) != 2:
             self._prepared = None
             self._current_tolerance_image = None
             self.status_label.setText("请选择两个窗口")
-            self.image_label.setText("请选择两个窗口")
-            self.image_label.setPixmap(QPixmap())
+            self.tolerance_view.set_empty_text("请选择两个窗口")
+            self.tolerance_view.set_image(None)
             return
         left = self._source_images.get(selected[0])
         right = self._source_images.get(selected[1])
@@ -838,33 +1269,40 @@ class ToleranceWindow(QDialog):
             self._prepared = None
             self._current_tolerance_image = None
             self.status_label.setText("当前图片不可用")
-            self.image_label.setText("当前图片不可用")
-            self.image_label.setPixmap(QPixmap())
+            self.tolerance_view.set_empty_text("当前图片不可用")
+            self.tolerance_view.set_image(None)
             return
-        algorithm = self.algorithm_combo.currentData()
+        algorithm = self.selected_algorithm()
         preview_size = self._preview_max_size()
-        self._prepared = self._tolerance_service.prepare_comparison(
-            left,
-            right,
-            algorithm,
-            max_size=preview_size,
+        roi = self._current_roi(left, right)
+        self._compute_job_id += 1
+        self._active_job_id = self._compute_job_id
+        self.status_label.setText("正在生成容差图...")
+        self.tolerance_view.set_empty_text("")
+        task = ToleranceComputeTask(
+            self._tolerance_service,
+            {
+                "job_id": self._active_job_id,
+                "left": left,
+                "right": right,
+                "tolerance": self.tolerance_slider.value(),
+                "algorithm": algorithm,
+                "preview_size": preview_size,
+                "roi": roi,
+                "sync_mode": self._view_mode == "sync",
+            },
         )
-        self._current_tolerance_image = self._tolerance_service.build_tolerance_map(
-            left,
-            right,
-            tolerance=self.tolerance_slider.value(),
-            algorithm=algorithm,
-            max_size=preview_size,
-        )
-        self.status_label.setText("容差图已更新")
-        self.image_label.setText("")
-        self._update_display_pixmap()
+        task.signals.preview_ready.connect(self._handle_preview_ready)
+        task.signals.final_ready.connect(self._handle_final_ready)
+        self._thread_pool.start(task)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_display_pixmap()
 
     def closeEvent(self, event) -> None:
+        self._active_job_id = -1
+        self._sync_refresh_timer.stop()
         self._window_state_store.save_window_size(
             "tolerance_window",
             self.width(),
@@ -878,22 +1316,53 @@ class ToleranceWindow(QDialog):
         super().closeEvent(event)
 
     def _preview_max_size(self) -> tuple[int, int]:
-        width = max(320, self.image_label.width() or 640)
-        height = max(180, self.image_label.height() or 360)
+        width = max(320, self.tolerance_view.width() or 640)
+        height = max(180, self.tolerance_view.height() or 360)
         return (width, height)
+
+    def _current_roi(self, left: QImage, right: QImage) -> tuple[int, int, int, int] | None:
+        if self._view_mode != "sync":
+            return None
+        zoom, center_x, center_y = self._pending_sync_view_state
+        if zoom <= 1.0:
+            return None
+        comparison_width = max(left.width(), right.width())
+        comparison_height = max(left.height(), right.height())
+        roi_width = max(1, round(comparison_width / zoom))
+        roi_height = max(1, round(comparison_height / zoom))
+        center_px = round(center_x * comparison_width)
+        center_py = round(center_y * comparison_height)
+        x = max(0, min(comparison_width - roi_width, center_px - roi_width // 2))
+        y = max(0, min(comparison_height - roi_height, center_py - roi_height // 2))
+        return (x, y, roi_width, roi_height)
 
     def _update_display_pixmap(self) -> None:
         if self._current_tolerance_image is None or self._current_tolerance_image.isNull():
             return
-        max_width, max_height = self._preview_max_size()
-        pixmap = QPixmap.fromImage(self._current_tolerance_image)
-        fitted = pixmap.scaled(
-            max_width,
-            max_height,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-        self.image_label.setPixmap(fitted)
+        self.tolerance_view.set_image(self._current_tolerance_image)
+        if self._view_mode == "sync":
+            _zoom, center_x, center_y = self._pending_sync_view_state
+            self.tolerance_view.set_view_state(1.0, center_x, center_y)
+
+    def _handle_preview_ready(
+        self, job_id: int, image: QImage, prepared: PreparedToleranceComparison
+    ) -> None:
+        if job_id != self._active_job_id:
+            return
+        self._prepared = prepared
+        self._current_tolerance_image = image
+        self.status_label.setText("容差图预览已更新")
+        self._update_display_pixmap()
+
+    def _handle_final_ready(
+        self, job_id: int, image: QImage, prepared: PreparedToleranceComparison
+    ) -> None:
+        if job_id != self._active_job_id:
+            return
+        self._prepared = prepared
+        self._current_tolerance_image = image
+        self.status_label.setText("容差图已更新")
+        self._update_display_pixmap()
 
     def _restore_window_size(self) -> None:
         saved_size = self._window_state_store.load_window_size("tolerance_window")

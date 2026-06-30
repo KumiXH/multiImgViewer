@@ -120,6 +120,9 @@ class MainWindow(QMainWindow):
             pane.swap_requested.connect(
                 lambda pane_index=index: self.handle_swap_requested(pane_index)
             )
+            pane.copy_path_requested.connect(
+                lambda pane_index=index: self.copy_pane_path(pane_index)
+            )
 
         self._source_configs: dict[int, object] = {}
         self._remote_server_names_by_pane: dict[int, str] = {}
@@ -189,7 +192,7 @@ class MainWindow(QMainWindow):
         self.top_toolbar = QWidget()
         self.top_toolbar_layout = QHBoxLayout(self.top_toolbar)
         self.top_toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        self.top_toolbar_layout.setSpacing(12)
+        self.top_toolbar_layout.setSpacing(8)
         self.top_toolbar_layout.addWidget(self.toggle_sidebar_button)
         self.top_toolbar_layout.addWidget(self.server_manager_button)
         self.top_toolbar_layout.addWidget(self.bind_source_button)
@@ -206,14 +209,14 @@ class MainWindow(QMainWindow):
         self.grid_host = QWidget()
         self.grid_layout = QGridLayout(self.grid_host)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
-        self.grid_layout.setSpacing(12)
+        self.grid_layout.setSpacing(6)
         for pane in self._panes:
             self.grid_layout.addWidget(pane)
 
         self.left_panel = QWidget()
         self.left_panel_layout = QVBoxLayout(self.left_panel)
         self.left_panel_layout.setContentsMargins(0, 0, 0, 0)
-        self.left_panel_layout.setSpacing(12)
+        self.left_panel_layout.setSpacing(6)
         self.left_panel_layout.addWidget(self.top_toolbar)
         self.left_panel_layout.addWidget(self.grid_host, 1)
 
@@ -281,11 +284,13 @@ class MainWindow(QMainWindow):
             connection=connection,
         )
         self._panes[pane_index].set_title(config.display_name)
+        self._panes[pane_index].set_bound_path(config.root_path)
         self._panes[pane_index]._is_bound = True
         if hasattr(self.image_service, "replace_sources"):
             self.image_service.replace_sources(self._sources_by_pane)
 
     def bind_source_path(self, pane_index: int, path: str) -> None:
+        previous_filename = self.current_filename()
         kind = SourceKind.UNC if path.startswith("\\\\") else SourceKind.LOCAL
         display_name = Path(path).name or path
         self.bind_source(
@@ -298,8 +303,7 @@ class MainWindow(QMainWindow):
                 recursive=True,
             ),
         )
-        self.refresh_catalog()
-        self.load_first_catalog_item_if_available()
+        self._refresh_catalog_preserving_current(previous_filename)
 
     def clear_pane_binding(self, pane_index: int) -> None:
         pane_id = f"pane-{pane_index + 1}"
@@ -326,6 +330,7 @@ class MainWindow(QMainWindow):
     def bind_remote_profile(
         self, pane_index: int, profile: SftpServerProfile, remote_path: str
     ) -> None:
+        previous_filename = self.current_filename()
         normalized_remote_path = remote_path.strip() or profile.default_root.strip()
         display_remote_path = normalized_remote_path or profile.default_root or "/"
         self.bind_source(
@@ -341,8 +346,7 @@ class MainWindow(QMainWindow):
             connection=profile.to_connection_config(),
         )
         self._remote_server_names_by_pane[pane_index] = profile.name
-        self.refresh_catalog()
-        self.load_first_catalog_item_if_available()
+        self._refresh_catalog_preserving_current(previous_filename)
 
     def set_view_state(self, zoom: float, center_x: float, center_y: float) -> None:
         self._zoom = zoom
@@ -557,6 +561,11 @@ class MainWindow(QMainWindow):
         elif action == "delete":
             self.session_record_store.delete_record(record.id)
 
+    def copy_pane_path(self, pane_index: int) -> None:
+        path = self._panes[pane_index].bound_path()
+        if path:
+            QGuiApplication.clipboard().setText(path)
+
     def save_current_record(self) -> None:
         dialog = SaveRecordDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -728,6 +737,7 @@ class MainWindow(QMainWindow):
             },
             current_filename=self.current_filename() or "",
         )
+        self._tolerance_window.set_sync_view_state(self._zoom, self._center_x, self._center_y)
 
     def _handle_pane_hover_position_changed(
         self,
@@ -751,6 +761,18 @@ class MainWindow(QMainWindow):
             self.position_label.setText(f"0 / {len(self._catalog_items)}")
             return
         self.position_label.setText(f"{self._current_index + 1} / {len(self._catalog_items)}")
+
+    def _refresh_catalog_preserving_current(self, preferred_filename: str | None) -> None:
+        self.refresh_catalog()
+        if not self._catalog_items:
+            self._current_index = -1
+            self.current_filename_label.setText("")
+            self._update_position_label()
+            return
+        if preferred_filename and preferred_filename in self._catalog_items:
+            self.set_current_index(self._catalog_items.index(preferred_filename))
+            return
+        self.load_first_catalog_item_if_available()
 
     def load_selected_file(self, relative_path: str) -> None:
         current_view = self.view_state()
@@ -800,6 +822,8 @@ class MainWindow(QMainWindow):
         self._center_x = center_x
         self._center_y = center_y
         self._apply_shared_view_state(exclude=source_pane)
+        if self._tolerance_window is not None and self._tolerance_window.isVisible():
+            self._tolerance_window.set_sync_view_state(zoom, center_x, center_y)
 
     def _apply_shared_view_state(self, exclude: ImagePaneWidget | None = None) -> None:
         for pane in self._panes[: self._active_pane_count]:
